@@ -1,5 +1,6 @@
 /*
  * Copyright 2012 Michael Ossmann
+ * Copyright 2014 Jared Boone <jared@sharebrained.com>
  *
  * This file is part of HackRF.
  *
@@ -144,11 +145,6 @@ void rffc5071_setup(void)
 	/* set ENBL and MODE to be configured via 3-wire interface,
 	 * not control pins. */
 	set_RFFC5071_SIPIN(1);
-
-#ifdef JAWBREAKER
-	/* initial safe switch control settings */
-	rffc5071_set_gpo(SWITCHCTRL_SAFE);
-#endif
 
 	/* GPOs are active at all times */
 	set_RFFC5071_GATE(1);
@@ -367,56 +363,20 @@ void rffc5071_regs_commit(void)
 	}
 }
 
-void rffc5071_tx(uint8_t gpo) {
+void rffc5071_tx(void) {
 	LOG("# rffc5071_tx\n");
 	set_RFFC5071_ENBL(0);
 	set_RFFC5071_FULLD(0);
 	set_RFFC5071_MODE(1); /* mixer 2 used for both RX and TX */
-#ifdef JAWBREAKER
-	/* honor SWITCHCTRL_AMP_BYPASS and SWITCHCTRL_HP settings from caller */
-	gpo &= (SWITCHCTRL_AMP_BYPASS | SWITCHCTRL_HP | SWITCHCTRL_MIX_BYPASS);
-	if ((gpo & SWITCHCTRL_AMP_BYPASS) == SWITCHCTRL_AMP_BYPASS)
-		gpo |= SWITCHCTRL_NO_TX_AMP_PWR;
-	gpo |= (SWITCHCTRL_TX | SWITCHCTRL_NO_RX_AMP_PWR);
-	rffc5071_set_gpo(gpo);
-#else
-	(void)gpo;
-#endif
 	rffc5071_regs_commit();
-
-#ifdef JAWBREAKER
-	/* honor SWITCHCTRL_MIX_BYPASS setting from caller */
-	if ((gpo & SWITCHCTRL_MIX_BYPASS) == SWITCHCTRL_MIX_BYPASS)
-		rffc5071_disable();
-	else
-#endif
-		rffc5071_enable();
 }
 
-void rffc5071_rx(uint8_t gpo) {
+void rffc5071_rx(void) {
 	LOG("# rfc5071_rx\n");
 	set_RFFC5071_ENBL(0);
 	set_RFFC5071_FULLD(0);
 	set_RFFC5071_MODE(1); /* mixer 2 used for both RX and TX */
-#ifdef JAWBREAKER
-	/* honor SWITCHCTRL_AMP_BYPASS and SWITCHCTRL_HP settings from caller */
-	gpo &= (SWITCHCTRL_AMP_BYPASS | SWITCHCTRL_HP | SWITCHCTRL_MIX_BYPASS);
-	if ((gpo & SWITCHCTRL_AMP_BYPASS) == SWITCHCTRL_AMP_BYPASS)
-		gpo |= SWITCHCTRL_NO_RX_AMP_PWR;
-	gpo |= SWITCHCTRL_NO_TX_AMP_PWR;
-	rffc5071_set_gpo(gpo);
-#else
-	(void)gpo;
-#endif
 	rffc5071_regs_commit();
-
-#ifdef JAWBREAKER
-	/* honor SWITCHCTRL_MIX_BYPASS setting from caller */
-	if ((gpo & SWITCHCTRL_MIX_BYPASS) == SWITCHCTRL_MIX_BYPASS)
-		rffc5071_disable();
-	else
-#endif
-		rffc5071_enable();
 }
 
 /*
@@ -446,14 +406,15 @@ void rffc5071_enable(void)  {
 
 #define LO_MAX 5400
 #define REF_FREQ 50
+#define FREQ_ONE_MHZ (1000*1000)
 
 /* configure frequency synthesizer in integer mode (lo in MHz) */
-uint32_t rffc5071_config_synth_int(uint16_t lo) {
+uint64_t rffc5071_config_synth_int(uint16_t lo) {
 	uint8_t lodiv;
 	uint16_t fvco;
 	uint8_t fbkdiv;
 	uint16_t n;
-	uint32_t tune_freq_hz;
+	uint64_t tune_freq_hz;
 	uint16_t p1nmsb;
 	uint8_t p1nlsb;
 	
@@ -462,7 +423,7 @@ uint32_t rffc5071_config_synth_int(uint16_t lo) {
 	/* Calculate n_lo */
 	uint8_t n_lo = 0;
 	uint16_t x = LO_MAX / lo;
-	while (x > 1) {
+	while ((x > 1) && (n_lo < 5)) {
 		n_lo++;
 		x >>= 1;
 	}
@@ -485,13 +446,14 @@ uint32_t rffc5071_config_synth_int(uint16_t lo) {
 
 	uint64_t tmp_n = ((uint64_t)fvco << 29ULL) / (fbkdiv*REF_FREQ) ;
 	n = tmp_n >> 29ULL;
+
 	p1nmsb = (tmp_n >> 13ULL) & 0xffff;
 	p1nlsb = (tmp_n >> 5ULL) & 0xff;
 	
-	//~ tune_freq = REF_FREQ*tmp_n*fbkdiv/lodiv / (1 << 29);
-	tune_freq_hz = (uint32_t)(REF_FREQ*tmp_n*fbkdiv/lodiv * 1000*1000 / (1 << 29ULL));
+	tune_freq_hz = (REF_FREQ * (tmp_n >> 5ULL) * fbkdiv * FREQ_ONE_MHZ)
+			/ (lodiv * (1 << 24ULL));
 	LOG("# lo=%d n_lo=%d lodiv=%d fvco=%d fbkdiv=%d n=%d tune_freq_hz=%d\n",
-	    lo, n_lo, lodiv, fvco, fbkdiv, n, tune_freq);
+			lo, n_lo, lodiv, fvco, fbkdiv, n, tune_freq);
 
 	/* Path 1 */
 	set_RFFC5071_P1LODIV(n_lo);
@@ -513,7 +475,7 @@ uint32_t rffc5071_config_synth_int(uint16_t lo) {
 }
 
 /* !!!!!!!!!!! hz is currently ignored !!!!!!!!!!! */
-uint32_t rffc5071_set_frequency(uint16_t mhz) {
+uint64_t rffc5071_set_frequency(uint16_t mhz) {
 	uint32_t tune_freq;
 
 	rffc5071_disable();
